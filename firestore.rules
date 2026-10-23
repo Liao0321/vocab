@@ -1,0 +1,58 @@
+rules_version = '2';
+// 英文單詞練習的資料庫安全規則
+// 老師名單：在 teachers 集合裡新增文件，文件 ID 就是老師的 Gmail（全部小寫），內容可以留空或寫 name。
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function isTeacher() {
+      return signedIn()
+        && request.auth.token.email_verified == true
+        && exists(/databases/$(database)/documents/teachers/$(request.auth.token.email));
+    }
+
+    // 老師名單：只能讀自己那一筆（用來判斷是不是老師），只能從 Firebase 主控台修改
+    match /teachers/{email} {
+      allow read: if signedIn() && request.auth.token.email == email;
+      allow write: if false;
+    }
+
+    // 字卡組：學生只看得到已發布的；只有老師能新增、修改、刪除
+    match /decks/{deckId} {
+      allow read: if signedIn() && (isTeacher() || resource.data.published == true);
+      allow write: if isTeacher();
+
+      match /words/{wordId} {
+        allow read: if signedIn() && (isTeacher()
+          || get(/databases/$(database)/documents/decks/$(deckId)).data.published == true);
+        allow write: if isTeacher();
+      }
+    }
+
+    // 每個人的練習紀錄：本人可讀寫，老師可讀
+    match /users/{uid} {
+      allow read: if signedIn() && (request.auth.uid == uid || isTeacher());
+      allow write: if signedIn() && request.auth.uid == uid;
+      match /{sub=**} {
+        allow read: if signedIn() && (request.auth.uid == uid || isTeacher());
+        allow write: if signedIn() && request.auth.uid == uid;
+      }
+    }
+
+    // 手寫作業：學生交自己的；老師可看全部、批改、刪除；學生只能把 applied 標成已套用
+    match /writings/{id} {
+      allow create: if signedIn() && request.resource.data.uid == request.auth.uid
+        && request.resource.data.marks == null;
+      allow read: if signedIn() && (resource.data.uid == request.auth.uid || isTeacher());
+      allow update: if isTeacher()
+        || (signedIn() && resource.data.uid == request.auth.uid
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['applied']));
+      allow delete: if isTeacher();
+    }
+    match /writingImages/{id} {
+      allow create: if signedIn() && request.resource.data.uid == request.auth.uid;
+      allow read: if signedIn() && (resource.data.uid == request.auth.uid || isTeacher());
+      allow delete: if isTeacher();
+    }
+  }
+}
