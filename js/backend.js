@@ -156,6 +156,31 @@ export async function createFirebaseBackend(cfg) {
       await b.commit();
     },
 
+    // 指定字卡組：assignments/{uid} = { decks: [字卡組 id] }；沒有這筆就是練習全部已發布的字卡組
+    async listStudents() {
+      const snap = await F.getDocs(F.collection(db, 'users'));
+      return snap.docs.map(d => ({ uid: d.id, ...d.data(), lastLogin: ms(d.data().lastLogin) }));
+    },
+    async listAssignments() {
+      const snap = await F.getDocs(F.collection(db, 'assignments'));
+      return Object.fromEntries(snap.docs.map(d => [d.id, d.data().decks || []]));
+    },
+    async setAssignments(uids, deckIds) {
+      for (let i = 0; i < uids.length; i += 400) {
+        const b = F.writeBatch(db);
+        uids.slice(i, i + 400).forEach(uid => {
+          const ref = F.doc(db, 'assignments', uid);
+          if (deckIds && deckIds.length) b.set(ref, { decks: deckIds, by: user.email, updatedAt: F.serverTimestamp() });
+          else b.delete(ref);
+        });
+        await b.commit();
+      }
+    },
+    async getMyDecks() {
+      try { const s = await F.getDoc(F.doc(db, 'assignments', user.uid)); return s.exists() ? (s.data().decks || null) : null; }
+      catch { return null; }
+    },
+
     async getProfile() {
       const s = await F.getDoc(uref());
       return s.exists() ? s.data() : {};
@@ -347,6 +372,17 @@ export function createDemoBackend() {
       return id;
     },
     async deleteWord(deckId, wordId) { delete db.decks[deckId].words[wordId]; persist(); },
+
+    async listStudents() {
+      return delay(Object.values(DEMO_USERS).map(u => ({ uid: u.uid, name: u.name, email: u.email, ...((db.users[u.uid] || {}).profile || {}) })));
+    },
+    async listAssignments() { return delay({ ...(db.assignments || {}) }); },
+    async setAssignments(uids, deckIds) {
+      db.assignments ||= {};
+      uids.forEach(uid => { if (deckIds && deckIds.length) db.assignments[uid] = deckIds; else delete db.assignments[uid]; });
+      persist();
+    },
+    async getMyDecks() { return delay((db.assignments || {})[me().uid] || null); },
 
     async getProfile() { return delay({ ...udata().profile }); },
     async getDays(fromKey) { return delay(Object.values(udata().days).filter(d => d.date >= fromKey)); },
