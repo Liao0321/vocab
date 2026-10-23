@@ -199,6 +199,7 @@ async function render() {
     if (a === 'writing' && b) return await renderWriting(b);
     if (a === 'review' && user.isTeacher) return b ? await renderWriting(b) : await renderReviewList();
     if (a === 'teach' && user.isTeacher) return b ? await renderEditor(b) : await renderTeach();
+    if (a === 'students' && user.isTeacher) return await renderStudents();
     return await renderHome();
   } catch (e) {
     console.error(e);
@@ -212,7 +213,7 @@ function renderTop() {
   if (!user) { ta.innerHTML = ''; return; }
   const { a } = route();
   ta.innerHTML = `
-    ${user.isTeacher ? `<button class="pill-btn ${a === 'teach' ? 'on' : ''}" data-act="teach">管理字卡組</button><button class="pill-btn ${a === 'review' ? 'on' : ''}" data-act="review">手寫作業</button>` : ''}
+    ${user.isTeacher ? `<button class="pill-btn ${a === 'teach' ? 'on' : ''}" data-act="teach">管理字卡組</button><button class="pill-btn ${a === 'students' ? 'on' : ''}" data-act="students">學生</button><button class="pill-btn ${a === 'review' ? 'on' : ''}" data-act="review">手寫作業</button>` : ''}
     <button class="me-btn ${a === 'dash' ? 'on' : ''}" data-act="dash" aria-label="個人練習紀錄" title="個人練習紀錄">${user.photo ? `<img src="${esc(user.photo)}" alt="" referrerpolicy="no-referrer">` : ICON.person}</button>`;
 }
 
@@ -260,7 +261,13 @@ const ALL = { id: 'all', title: '全部單字' };
 async function loadAllWords(force) {
   if (curDeck && !force) return;
   decks = await be.listDecks();
-  const lists = await Promise.all(decks.filter(d => d.published).map(d => be.getWords(d.id).catch(() => [])));
+  let use = decks.filter(d => d.published);
+  if (!user.isTeacher) {
+    // 老師有替這位學生指定字卡組，就只練那些（指定的都被刪掉或取消發布時，回到全部）
+    const mine = await be.getMyDecks();
+    if (mine && mine.length) { const set = new Set(mine); const pick = use.filter(d => set.has(d.id)); if (pick.length) use = pick; }
+  }
+  const lists = await Promise.all(use.map(d => be.getWords(d.id).catch(() => [])));
   curWords = lists.flat(); indexWords(curWords); curDeck = ALL;
 }
 
@@ -1045,6 +1052,80 @@ async function practiceWeak() {
 /* ===================================================================== */
 /* 老師：字卡組管理                                                        */
 /* ===================================================================== */
+/* 學生：替每位學生指定要練習的字卡組 */
+async function renderStudents() {
+  app.innerHTML = '<p class="loading">載入學生名單…</p>';
+  const [all, plan, ds] = await Promise.all([be.listStudents(), be.listAssignments(), be.listDecks()]);
+  decks = ds;
+  const pub = ds.filter(d => d.published), title = new Map(ds.map(d => [d.id, d]));
+  const people = all.filter(p => p.uid !== user.uid)
+    .sort((a, b) => (a.name || a.email || '').localeCompare(b.name || b.email || '', 'zh-Hant'));
+  const picked = new Set();
+  const today = dateKey();
+  const tagsOf = uid => {
+    const ids = plan[uid];
+    if (!ids || !ids.length) return '<span class="tag">全部已發布</span>';
+    return ids.map(id => { const d = title.get(id); return d ? `<span class="tag ${d.published ? 'mine' : 'draft'}">${esc(d.title)}${d.published ? '' : '（未發布）'}</span>` : ''; }).join(' ') || '<span class="tag">全部已發布</span>';
+  };
+  const lastOf = p => !p.lastDate ? '還沒練習過' : p.lastDate === today ? '今天有練習' : `最後練習 ${p.lastDate.slice(5).replace('-', '/')}`;
+  app.innerHTML = `
+  <section class="stack">
+    <div class="section-title" style="margin-top:0"><h2>學生</h2><small class="muted">${people.length} 位</small></div>
+    <div class="panel stack" style="padding-block:16px" id="assignPanel">
+      <h3>指定字卡組 <small class="muted" id="pickedN">先在下面勾選學生</small></h3>
+      ${pub.length ? `<div class="deck-checks">${pub.map(d => `<label class="chk"><input type="checkbox" value="${esc(d.id)}"><span>${esc(d.title)} <small class="muted">${d.wordCount || 0} 字</small></span></label>`).join('')}</div>`
+        : '<div class="empty">還沒有已發布的字卡組。</div>'}
+      <div class="row"><button class="btn" id="as-apply" disabled>指定給勾選的學生</button><button class="btn ghost" id="as-clear" disabled>改回全部字卡組</button></div>
+      <small class="muted">沒有被指定的學生，會練習全部已發布的字卡組。指定之後，學生下次打開網站就只會練到這些字卡組。</small>
+    </div>
+    ${people.length ? `
+      <label class="chk allchk"><input type="checkbox" id="pickAll"><span>全選</span></label>
+      <div class="stack" id="stuList" style="gap:8px">${people.map(p => `
+        <label class="srow" data-uid="${esc(p.uid)}">
+          <input type="checkbox" class="pick" value="${esc(p.uid)}">
+          ${p.photo ? `<img class="ava" src="${esc(p.photo)}" alt="" referrerpolicy="no-referrer">` : `<span class="ava">${ICON.person}</span>`}
+          <span class="who"><b>${esc(p.name || p.email || '（沒有名字）')}</b><small class="muted">${esc(p.email || '')}</small>
+            <small class="muted">${lastOf(p)} · 連續 ${liveStreak(p)} 天 · 共 ${p.totalAnswers || 0} 題</small></span>
+          <span class="as-tags" id="tags-${esc(p.uid)}">${tagsOf(p.uid)}</span>
+        </label>`).join('')}</div>`
+      : '<div class="empty">還沒有學生登入過。學生用 Google 帳號登入一次之後，就會出現在這裡。</div>'}
+  </section>`;
+  const deckBoxes = () => $$('#assignPanel input[type=checkbox]');
+  const sync = () => {
+    $('#pickedN').textContent = picked.size ? `已勾選 ${picked.size} 位學生` : '先在下面勾選學生';
+    $('#as-apply').disabled = !picked.size || !deckBoxes().some(x => x.checked);
+    $('#as-clear').disabled = !picked.size;
+    const pa = $('#pickAll'); if (pa) { pa.checked = picked.size === people.length; pa.indeterminate = picked.size > 0 && picked.size < people.length; }
+    $$('.srow').forEach(r => r.classList.toggle('on', picked.has(r.dataset.uid)));
+  };
+  // 只勾一位學生時，上面的字卡組自動帶出他目前的設定
+  const loadOne = () => {
+    if (picked.size !== 1) return;
+    const ids = new Set(plan[[...picked][0]] || []);
+    deckBoxes().forEach(x => { x.checked = ids.has(x.value); });
+  };
+  $$('.pick').forEach(c => c.addEventListener('change', () => {
+    if (c.checked) picked.add(c.value); else picked.delete(c.value);
+    loadOne(); sync();
+  }));
+  $('#pickAll')?.addEventListener('change', e => {
+    $$('.pick').forEach(c => { c.checked = e.target.checked; if (c.checked) picked.add(c.value); else picked.delete(c.value); });
+    sync();
+  });
+  deckBoxes().forEach(x => x.addEventListener('change', sync));
+  const save = async ids => {
+    const uids = [...picked];
+    try {
+      await be.setAssignments(uids, ids);
+      uids.forEach(u => { if (ids) plan[u] = ids; else delete plan[u]; $('#tags-' + CSS.escape(u)).innerHTML = tagsOf(u); });
+      toast(ids ? `已替 ${uids.length} 位學生指定 ${ids.length} 個字卡組` : `${uids.length} 位學生改回練習全部字卡組`);
+    } catch (err) { toast(errMsg(err), 4000); }
+  };
+  $('#as-apply').addEventListener('click', () => save(deckBoxes().filter(x => x.checked).map(x => x.value)));
+  $('#as-clear').addEventListener('click', () => save(null));
+  sync();
+}
+
 async function renderTeach() {
   curDeck = null;
   app.innerHTML = '<p class="loading">載入字卡組…</p>';
@@ -1110,6 +1191,7 @@ async function renderEditor(deckId) {
           <div class="field"><label for="f-ipa">英文音標</label><input id="f-ipa" type="text" placeholder="/ˈæp.əl/">
             <div class="ipa-keys" id="ipaKeys">${IPA_KEYS.map(k => `<button type="button" data-k="${k}">${k}</button>`).join('')}</div></div>
           <div class="field"><span class="lbl">輔助圖片</span><input id="f-img" type="file" accept="image/*"><div class="media-prev" id="p-img"></div></div>
+          <div class="field"><label for="f-emoji">圖示（沒有圖片時顯示，例如 🍎）</label><input id="f-emoji" type="text" maxlength="8" placeholder="🍎" autocomplete="off"></div>
           <div class="field"><span class="lbl">英文音檔（沒有的話用裝置語音念）</span><input id="f-enAudio" type="file" accept="audio/*"><div class="media-prev" id="p-enAudio"></div></div>
           <div class="field"><span class="lbl">中文音檔（沒有的話用裝置語音念）</span><input id="f-zhAudio" type="file" accept="audio/*"><div class="media-prev" id="p-zhAudio"></div></div>
           <div class="field"><span class="lbl">試聽</span><div class="row"><button class="btn small ghost" type="button" data-act="test-say" data-lang="en">念英文</button><button class="btn small ghost" type="button" data-act="test-say" data-lang="zh">念中文</button></div></div>
@@ -1123,10 +1205,10 @@ async function renderEditor(deckId) {
       <summary>批次匯入（Excel／CSV ＋ 音檔、圖片）</summary>
       <div class="stack">
         <p style="margin:0">在 Excel 或 Google 試算表依照下面的欄位排好，可以直接複製貼上，或存成 CSV 上傳。第一列是標題列。</p>
-        <div class="code">中文,英文,詞性,音標,中文音檔,英文音檔,圖片
-蘋果,apple,n.,/ˈæp.əl/,apple_zh.mp3,apple.mp3,apple.jpg
-跑,run,v.,/rʌn/,,,</div>
-        <p class="muted" style="margin:0;font-size:14px">音檔和圖片欄填檔名，再把那些檔案一起選進來。檔名欄空白時，會自動找：英文音檔「apple.mp3」、中文音檔「蘋果.mp3」或「apple_zh.mp3」、圖片「apple.jpg」。</p>
+        <div class="code">中文,英文,詞性,音標,中文音檔,英文音檔,圖片,圖示
+蘋果,apple,n.,/ˈæp.əl/,apple_zh.mp3,apple.mp3,apple.jpg,
+跑,run,v.,/rʌn/,,,,🏃</div>
+        <p class="muted" style="margin:0;font-size:14px">音檔和圖片欄填檔名，再把那些檔案一起選進來。檔名欄空白時，會自動找：英文音檔「apple.mp3」、中文音檔「蘋果.mp3」或「apple_zh.mp3」、圖片「apple.jpg」。沒有圖片的話，可以在「圖示」欄放一個 emoji 代替。</p>
         <div class="field"><label for="b-text">貼上表格內容</label><textarea id="b-text" placeholder="從 Excel 複製後貼在這裡"></textarea></div>
         <div class="form-grid">
           <div class="field"><span class="lbl">或上傳 CSV 檔</span><input id="b-csv" type="file" accept=".csv,.tsv,.txt,text/csv"></div>
@@ -1187,12 +1269,12 @@ function bindEditor() {
     e.preventDefault();
     const w = {
       id: edit.editingId || undefined,
-      zh: $('#f-zh').value.trim(), en: $('#f-en').value.trim(), pos: $('#f-pos').value.trim(), ipa: $('#f-ipa').value.trim(),
+      zh: $('#f-zh').value.trim(), en: $('#f-en').value.trim(), pos: $('#f-pos').value.trim(), ipa: $('#f-ipa').value.trim(), emoji: $('#f-emoji').value.trim(),
       img: edit.media.img, enAudio: edit.media.enAudio, zhAudio: edit.media.zhAudio,
     };
     if (!w.zh || !w.en) return toast('中文和英文都要填');
     const old = edit.words.find(x => x.id === w.id);
-    if (old) { w.order = old.order; if (old.emoji) w.emoji = old.emoji; }
+    if (old) w.order = old.order;
     const btn = $('#saveWord'); btn.disabled = true;
     try {
       const id = await be.saveWord(deckId, w);
@@ -1225,7 +1307,7 @@ function resetWordForm() {
 function startEditWord(id) {
   const w = edit.words.find(x => x.id === id); if (!w) return;
   edit.editingId = id; edit.media = { img: w.img, enAudio: w.enAudio, zhAudio: w.zhAudio };
-  $('#f-zh').value = w.zh; $('#f-en').value = w.en; $('#f-pos').value = w.pos || ''; $('#f-ipa').value = w.ipa || '';
+  $('#f-zh').value = w.zh; $('#f-en').value = w.en; $('#f-pos').value = w.pos || ''; $('#f-ipa').value = w.ipa || ''; $('#f-emoji').value = w.emoji || '';
   ['img', 'enAudio', 'zhAudio'].forEach(k => { $('#f-' + k).value = ''; drawMedia(k); });
   $('#formTitle').textContent = `編輯：${w.en}`; $('#saveWord').textContent = '儲存修改'; $('#cancelEdit').hidden = false;
   $('#addPanel').open = true; $('#addPanel').scrollIntoView({ behavior: reduced ? 'auto' : 'smooth' });
@@ -1282,8 +1364,11 @@ const HEADERS = {
   zhAudio: ['中文音檔', '中文發音', 'chinese audio', 'zh audio'],
   enAudio: ['英文音檔', '英文發音', 'english audio', 'en audio', 'audio'],
   img: ['圖片', '輔助圖片', '圖', 'image', 'picture', 'img'],
+  emoji: ['圖示', '表情符號', 'emoji', 'icon'],
 };
-const DEFAULT_ORDER = ['zh', 'en', 'pos', 'ipa', 'zhAudio', 'enAudio', 'img'];
+const DEFAULT_ORDER = ['zh', 'en', 'pos', 'ipa', 'zhAudio', 'enAudio', 'img', 'emoji'];
+// 圖片欄如果填的不是檔名（沒有副檔名、很短），就當成圖示（emoji）
+const looksEmoji = v => v && v.length <= 8 && !/\.[a-z0-9]{2,4}$/i.test(v) && /[^\x00-\x7f]/.test(v);
 
 async function batchImport(deckId) {
   const out = $('#b-out'), btn = $('#b-go');
@@ -1323,12 +1408,14 @@ async function batchImport(deckId) {
   let ok = 0, nImg = 0, nEn = 0, nZh = 0;
   for (let i = 0; i < body.length; i++) {
     const r = body[i];
-    const w = { zh: get(r, 'zh'), en: get(r, 'en'), pos: get(r, 'pos'), ipa: get(r, 'ipa') };
+    const w = { zh: get(r, 'zh'), en: get(r, 'en'), pos: get(r, 'pos'), ipa: get(r, 'ipa'), emoji: get(r, 'emoji') };
+    let imgName = get(r, 'img');
+    if (looksEmoji(imgName)) { w.emoji = w.emoji || imgName; imgName = ''; }
     if (!w.zh || !w.en) { log.push(`第 ${i + 1} 列缺少中文或英文，略過。`); continue; }
     say(`匯入中… ${i + 1} / ${body.length}：${w.en}`);
     const en = w.en.toLowerCase();
     const plan = {
-      img: find(get(r, 'img'), 'img', [en, w.zh, en.replace(/\s+/g, '_'), en.replace(/\s+/g, '-')]),
+      img: find(imgName, 'img', [en, w.zh, en.replace(/\s+/g, '_'), en.replace(/\s+/g, '-')]),
       enAudio: find(get(r, 'enAudio'), 'audio', [en, en + '_en', en + '-en', en.replace(/\s+/g, '_'), en.replace(/\s+/g, '-')]),
       zhAudio: find(get(r, 'zhAudio'), 'audio', [w.zh, en + '_zh', en + '-zh', en + '_cn', en + '_ch']),
     };
@@ -1376,6 +1463,7 @@ document.addEventListener('click', async e => {
       case 'dash': return go('dash');
       case 'teach': return go('teach');
       case 'review': return go('review');
+      case 'students': return go('students');
       case 'open-writing': return go((user.isTeacher && route().a === 'review' ? 'review/' : 'writing/') + encodeURIComponent(b.dataset.id));
       case 'signin': return await be.signIn();
       case 'demo-login': return await be.signIn(b.dataset.role);
